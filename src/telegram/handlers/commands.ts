@@ -39,7 +39,7 @@ export interface CommandDeps {
   executor: Executor;
   assetManager: import('../../execution/asset-manager.js').AssetManager;
   db: Database;
-  eventBus: any;
+  eventBus?: any;
   startTime: number;
 }
 
@@ -705,23 +705,59 @@ export function registerCommands(bot: Telegraf<Context>): void {
 
     // Regex to match EVM address: 0x followed by 40 hex chars
     const addressMatch = text.match(/0x[a-fA-F0-9]{40}/);
-    if (!addressMatch) {
+    let address = '';
+    let detectedChain: ChainId = 'ethereum';
+    let isExplicitChain = false;
+    
+    // Check if it's a URL
+    const urlMatch = text.match(/https?:\/\/[^\s]+/);
+    
+    if (addressMatch) {
+      address = addressMatch[0];
+    } else if (urlMatch) {
+      // It's a URL but has no visible address, trigger Deep Scan
+      const url = urlMatch[0];
+      const initialMsg = await ctx.reply(`🕵️ *Deep Scanning Website...*\n\nFetching source code and JS bundles for \`${escapeMarkdownV2(url)}\``, { parse_mode: 'MarkdownV2' });
+      
+      try {
+        const { deepScanUrlForContracts } = await import('../../services/web-scraper.js');
+        const found = await deepScanUrlForContracts(url, deps.adapters);
+        
+        if (found.length === 0) {
+          await ctx.telegram.editMessageText(ctx.chat.id, initialMsg.message_id, undefined, `❌ *No valid smart contracts found on that website.*`, { parse_mode: 'MarkdownV2' });
+          return next();
+        }
+        
+        // If we found contracts, we just use the first one for now
+        const target = found[0];
+        if (!target) {
+          await ctx.telegram.editMessageText(ctx.chat.id, initialMsg.message_id, undefined, `❌ *No valid smart contracts found on that website.*`, { parse_mode: 'MarkdownV2' });
+          return next();
+        }
+        address = target.address;
+        detectedChain = target.chain;
+        isExplicitChain = true; // Skip URL-guessing below
+        await ctx.telegram.editMessageText(ctx.chat.id, initialMsg.message_id, undefined, `✅ *Found Contract!* \`${address}\` on ${detectedChain}\n\nProceeding to analysis...`, { parse_mode: 'MarkdownV2' });
+        
+      } catch (err: any) {
+        await ctx.telegram.editMessageText(ctx.chat.id, initialMsg.message_id, undefined, `❌ *Deep Scan Failed:*\n${escapeMarkdownV2(err.message)}`, { parse_mode: 'MarkdownV2' });
+        return next();
+      }
+    } else {
       return next();
     }
 
-    const address = addressMatch[0];
-    let detectedChain: ChainId = 'ethereum';
-    let isExplicitChain = false;
-
-    // Guess chain from URL if present
-    const t = text.toLowerCase();
-    if (t.includes('basescan')) { detectedChain = 'base'; isExplicitChain = true; }
-    else if (t.includes('polygonscan')) { detectedChain = 'polygon'; isExplicitChain = true; }
-    else if (t.includes('arbiscan')) { detectedChain = 'arbitrum'; isExplicitChain = true; }
-    else if (t.includes('optimistic.etherscan')) { detectedChain = 'optimism'; isExplicitChain = true; }
-    else if (t.includes('snowtrace')) { detectedChain = 'avalanche'; isExplicitChain = true; }
-    else if (t.includes('bscscan')) { detectedChain = 'bsc'; isExplicitChain = true; }
-    else if (t.includes('robinhoodchain')) { detectedChain = 'robinhood'; isExplicitChain = true; }
+    // Guess chain from URL if present (only if not already explicitly set by scraper)
+    if (!isExplicitChain) {
+      const t = text.toLowerCase();
+      if (t.includes('basescan')) { detectedChain = 'base'; isExplicitChain = true; }
+      else if (t.includes('polygonscan')) { detectedChain = 'polygon'; isExplicitChain = true; }
+      else if (t.includes('arbiscan')) { detectedChain = 'arbitrum'; isExplicitChain = true; }
+      else if (t.includes('optimistic.etherscan')) { detectedChain = 'optimism'; isExplicitChain = true; }
+      else if (t.includes('snowtrace')) { detectedChain = 'avalanche'; isExplicitChain = true; }
+      else if (t.includes('bscscan')) { detectedChain = 'bsc'; isExplicitChain = true; }
+      else if (t.includes('robinhoodchain')) { detectedChain = 'robinhood'; isExplicitChain = true; }
+    }
 
     let adapter = deps.adapters.get(detectedChain);
     if (!adapter) {
@@ -806,7 +842,7 @@ export function registerCommands(bot: Telegraf<Context>): void {
 
     if (info.totalSupply !== undefined && info.maxSupply !== undefined && info.maxSupply > 0) {
       const percentage = ((info.totalSupply / info.maxSupply) * 100).toFixed(1);
-      supplyStr = `\n*Supply:* ${escapeMarkdownV2(info.totalSupply.toString())} / ${escapeMarkdownV2(info.maxSupply.toString())} Minted (${escapeMarkdownV2(percentage)}%)`;
+      supplyStr = `\n*Supply:* ${escapeMarkdownV2(info.totalSupply.toString())} / ${escapeMarkdownV2(info.maxSupply.toString())} Minted \\(${escapeMarkdownV2(percentage)}\\%\\)`;
     } else if (info.totalSupply !== undefined) {
       supplyStr = `\n*Supply:* ${escapeMarkdownV2(info.totalSupply.toString())} minted`;
     } else if (info.maxSupply !== undefined) {
